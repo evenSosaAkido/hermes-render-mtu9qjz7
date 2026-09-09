@@ -1,32 +1,120 @@
 # yaml-language-server: $schema=https://render.com/schema/render.yaml.json
 #
-# Hermes Agent on Render, pre-baked with Render tools.
+# Hermes Agent on Render, pre-baked with Render tools — behind Okta SSO.
 # https://github.com/NousResearch/hermes-agent
 #
-# Single web service built from the local Dockerfile, which extends the
-# upstream Hermes image with:
-#   - The official render-oss/skills bundle, pinned at a commit
-#   - The Render MCP server pre-registered in config.yaml at boot
-#     with the full MCP tool catalog available to the provided API key
+# SECURITY ARCHITECTURE (see README "Authentication (Okta SSO)"):
 #
-# Inside the container the gateway runs in the foreground and the
-# dashboard runs as a background side-process (HERMES_DASHBOARD=1).
-# Render's public URL serves the dashboard on port 10000; persistent
-# state lives on a 5 GB disk mounted at /opt/data (HERMES_HOME default).
+#   Okta (OIDC, group-gated)
+#         │  login
+#         ▼
+#   [ hermes-auth ]  type: web   — the ONLY public service (oauth2-proxy)
+#         │  private network (region-internal, never public)
+#         ▼
+#   [ hermes ]       type: pserv — private service, NO public URL
+#         │
+#         ▼
+#     /opt/data (persistent disk)
+#
+# The Hermes dashboard has no built-in auth, so it is deployed as a PRIVATE
+# service (no onrender.com URL, reachable only on Render's in-region private
+# network). oauth2-proxy is the public entrypoint: it forces an Okta OIDC
+# login and only proxies members of the allowed Okta group through to Hermes.
+#
+# Both services MUST be in the same region for private networking to work.
+#
+# PHI NOTE: This auth layer is necessary but NOT sufficient for HIPAA. Real
+# PHI additionally requires a HIPAA-enabled Render workspace (Scale/Enterprise
+# plan + signed BAA), scrubbing PHI from Hermes logs, and BAAs with every
+# downstream (Bedrock ✓, EHR, Quickbase). See the README.
 #
 # To upgrade Hermes: bump HERMES_IMAGE in the Dockerfile and redeploy.
 # To upgrade Render skills: bump RENDER_SKILLS_REF and redeploy.
 
 services:
+  # ===========================================================================
+  # Public auth gateway (oauth2-proxy). The only internet-reachable service.
+  # Authenticates every request against Okta via OIDC and only forwards users
+  # in OAUTH2_PROXY_ALLOWED_GROUPS through to the private Hermes service.
+  # ===========================================================================
   - type: web
+    name: hermes-auth
+    runtime: image
+    region: oregon
+    plan: starter
+    image:
+      # Pinned oauth2-proxy release. Public image, no registry creds needed.
+      url: quay.io/oauth2-proxy/oauth2-proxy:v7.7.1
+    healthCheckPath: /ping
+    autoDeployTrigger: off
+    envVars:
+      # Listen on Render's expected web port and trust its load balancer's
+      # X-Forwarded-* headers (needed for correct redirect/cookie behavior).
+      - key: OAUTH2_PROXY_HTTP_ADDRESS
+        value: "0.0.0.0:10000"
+      - key: OAUTH2_PROXY_REVERSE_PROXY
+        value: "true"
+
+      # Okta via generic OIDC. Skip the interstitial button so users go
+      # straight to Okta.
+      - key: OAUTH2_PROXY_PROVIDER
+        value: oidc
+      - key: OAUTH2_PROXY_PROVIDER_DISPLAY_NAME
+        value: Okta
+      - key: OAUTH2_PROXY_SKIP_PROVIDER_BUTTON
+        value: "true"
+
+      # Upstream = the private Hermes service, reached by its service name on
+      # the region-internal private network. Confirm the exact "Internal
+      # Address" on the hermes service's dashboard page if this ever changes.
+      - key: OAUTH2_PROXY_UPSTREAMS
+        value: http://hermes:10000
+
+      # Accept any verified email domain; group membership is the real gate.
+      # Narrow to your domain (e.g. "akido.com") for defense in depth.
+      - key: OAUTH2_PROXY_EMAIL_DOMAINS
+        value: "*"
+
+      # Request the groups claim and enforce membership. Requires the Okta
+      # authorization server to emit a "groups" claim (see README).
+      - key: OAUTH2_PROXY_SCOPE
+        value: "openid email profile groups"
+      - key: OAUTH2_PROXY_OIDC_GROUPS_CLAIM
+        value: groups
+
+      # Session cookie is HTTPS-only (Render terminates TLS at the edge).
+      - key: OAUTH2_PROXY_COOKIE_SECURE
+        value: "true"
+
+      # ---- Set these from the Render Environment tab (sync: false) ----------
+      # OIDC issuer, e.g. https://YOUR_ORG.okta.com/oauth2/default
+      - key: OAUTH2_PROXY_OIDC_ISSUER_URL
+        sync: false
+      - key: OAUTH2_PROXY_CLIENT_ID
+        sync: false
+      - key: OAUTH2_PROXY_CLIENT_SECRET
+        sync: false
+      # 32-byte cookie secret. Generate with: scripts/gen-cookie-secret.sh
+      - key: OAUTH2_PROXY_COOKIE_SECRET
+        sync: false
+      # Must exactly match the Okta app's redirect URI and this service's URL:
+      #   https://<hermes-auth service>.onrender.com/oauth2/callback
+      - key: OAUTH2_PROXY_REDIRECT_URL
+        sync: false
+      # Comma-separated Okta group name(s) allowed in, e.g. "hermes-users"
+      - key: OAUTH2_PROXY_ALLOWED_GROUPS
+        sync: false
+
+  # ===========================================================================
+  # Hermes itself — now a PRIVATE service. No onrender.com URL; reachable only
+  # by hermes-auth over the private network. Everything else is unchanged from
+  # the standard template (Dockerfile build, disk, dashboard side-process).
+  # ===========================================================================
+  - type: pserv
     name: hermes
     runtime: docker
     region: oregon
     plan: standard
-    # Render builds the image from this repo's Dockerfile on every deploy.
-    # The Dockerfile FROMs the pinned upstream Hermes image, adds Render
-    # tooling + the skill bundle, and sets ENTRYPOINT to our bootstrap wrapper — so
-    # no `dockerCommand` override is needed here.
     dockerfilePath: ./Dockerfile
     autoDeployTrigger: off
     healthCheckPath: /api/status
@@ -37,42 +125,27 @@ services:
       sizeGB: 5
 
     envVars:
-      # The Blueprint only carries vars that change how the container boots
-      # or that wire up the bundled Render tools. All provider keys, tool
-      # keys, and chat platform tokens are set through the Hermes dashboard
-      # (API Keys tab), which writes them to /opt/data/.env on the disk.
-
       # Dashboard side-process. The entrypoint backgrounds `hermes dashboard`
       # before exec'ing `gateway run` whenever HERMES_DASHBOARD is truthy.
-      # HERMES_DASHBOARD_HOST=0.0.0.0 makes the entrypoint pass --insecure
-      # so the dashboard accepts non-loopback binds.
+      # HERMES_DASHBOARD_HOST=0.0.0.0 makes it bind all interfaces (and pass
+      # --insecure) so hermes-auth can reach it over the private network.
       - key: HERMES_DASHBOARD
         value: "1"
       - key: HERMES_DASHBOARD_HOST
         value: "0.0.0.0"
       - key: HERMES_DASHBOARD_PORT
         value: "10000"
-      # Exposes a Chat tab in the dashboard that embeds the full Hermes TUI
-      # over a server-side PTY + xterm.js. This is how you chat with the
-      # agent without a real terminal on the host side.
+      # Full Hermes TUI in the browser (server-side PTY + xterm.js).
       - key: HERMES_DASHBOARD_TUI
         value: "1"
 
-      # Generated once at first deploy. Reuse this value as API_SERVER_KEY
-      # in the dashboard if you later opt into the OpenAI-compatible API
-      # server (API_SERVER_ENABLED=true).
+      # Generated once at first deploy. Reuse as API_SERVER_KEY in the
+      # dashboard if you later opt into the OpenAI-compatible API server.
       - key: HERMES_GATEWAY_TOKEN
         generateValue: true
 
-      # Bearer token for the pre-registered Render MCP server. Generate
-      # at https://dashboard.render.com/u/*/settings#api-keys and paste
-      # into the dashboard's Environment tab. The boot-time patcher
-      # reads ${RENDER_MCP_API_KEY} into config.yaml lazily, so you can
-      # rotate by editing the env var and restarting — no rebuild needed.
-      #
-      # Named `RENDER_MCP_API_KEY` rather than the stock `RENDER_API_KEY`
-      # to avoid accidental auto-auth if someone later installs the
-      # `render` CLI. This is the same kind of Render API key; the Render
-      # account role behind the key determines what the agent can do.
+      # Bearer token for the pre-registered Render MCP server. Set from the
+      # Environment tab; the boot-time patcher reads ${RENDER_MCP_API_KEY}
+      # into config.yaml lazily, so rotate by editing + restarting.
       - key: RENDER_MCP_API_KEY
         sync: false

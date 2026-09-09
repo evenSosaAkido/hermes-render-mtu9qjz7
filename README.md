@@ -122,6 +122,8 @@ The Hermes dashboard has no built-in authentication. Anyone who knows the servic
 - Keep the dashboard reachable only through a private network path, such as Tailscale.
 - Accept the risk for a demo, use low-privilege keys, and delete the service when you're done.
 
+> **Okta SSO is wired up in this repo.** The default `render.yaml` deploys Hermes as a *private* service behind an [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/) gateway that requires an Okta OIDC login and restricts access to an allowed Okta group. See **[`docs/AUTH.md`](docs/AUTH.md)** for the full Okta + Render setup — **and read its PHI section before running any real patient data through this deployment.**
+
 Read the **Security** section before you paste production API keys.
 
 ## Run locally
