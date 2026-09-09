@@ -124,6 +124,96 @@ The Hermes dashboard has no built-in authentication. Anyone who knows the servic
 
 Read the **Security** section before you paste production API keys.
 
+## Run locally
+
+Render builds this repo's `Dockerfile` and runs the resulting container. You can do the same on your own machine with Docker — useful for trying the image out, debugging the config patcher, or running Hermes on hardware you control instead of paying for a Render service. There is no separate "app" to run: locally you build the same image and run the same container Render would, minus Render's managed disk and env-var UI.
+
+### Prerequisites
+
+- **Docker** installed and running. The first build pulls the upstream Hermes base image (~2.6 GB compressed), so budget a few minutes and enough disk.
+- **An LLM provider key**, same as a Render deploy — e.g. `OPENROUTER_API_KEY` or `ANTHROPIC_API_KEY`. Nothing works until at least one is set (you can add it from the dashboard after boot instead of prefilling).
+- **Optional — a Render API key** for the bundled MCP server, from [`dashboard.render.com/u/*/settings#api-keys`](https://dashboard.render.com/u/*/settings#api-keys). Omit it and the agent runs fine, just without Render tools.
+- **Optional — a configured AWS CLI, only if you want to use Amazon Bedrock as the model provider.** Hermes' `bedrock` provider authenticates through the standard AWS SDK credential chain, so there's no API-key field — you inject AWS credentials as environment variables. You don't have to copy them by hand; the helper script and the commands below pull them straight from your existing AWS CLI setup. This assumes the Bedrock models you want are already enabled in your account/region.
+
+### Steps
+
+The fastest path is the helper script. First-time setup — copy the example env file and fill in what you need:
+
+```bash
+cp .env.local.example .env.local
+# edit .env.local: set RENDER_MCP_API_KEY, and USE_BEDROCK=1 / AWS_PROFILE if using Bedrock
+```
+
+`.env.local` is gitignored, so your keys never get committed. (It's separate from `.env.example`, which documents the Render *deploy* env vars.) Then just run:
+
+```bash
+scripts/run-local.sh
+```
+
+The script builds the image if it's missing, loads `.env.local`, and runs the container with the right env vars. With `USE_BEDROCK=1` it also pulls your AWS credentials automatically so you never type them. Any value you export in your shell overrides `.env.local`, so one-off runs still work:
+
+```bash
+USE_BEDROCK=1 AWS_PROFILE=prod scripts/run-local.sh
+```
+
+Recognized keys (in `.env.local` or the shell): `IMAGE`, `PORT`, `DATA_DIR`, `RENDER_MCP_API_KEY`, `USE_BEDROCK`, `AWS_PROFILE`, `AWS_REGION`, and `BUILD=1` (force rebuild). For Bedrock it uses `aws configure export-credentials` to resolve static keys, SSO sessions, assumed roles, and temporary/STS credentials (session token included), writes them to a temp env-file, and passes that to `docker run --env-file` — so keys never appear in your shell history or `ps` output. If your AWS profiles are SSO-based, run `aws sso login` first so a session exists.
+
+Prefer to run the commands yourself? The manual equivalents follow.
+
+#### Manual steps
+
+1. **Build the image** from the repo root:
+
+   ```bash
+   docker build -t hermes-render .
+   ```
+
+2. **Run the container.** This mirrors the env vars `render.yaml` sets and mounts a local directory as the persistent-disk equivalent (`.env`, `config.yaml`, sessions, memories — so state survives restarts):
+
+   ```bash
+   docker run --rm -it \
+     -p 10000:10000 \
+     -v "$PWD/hermes-data:/opt/data" \
+     -e HERMES_DASHBOARD=1 \
+     -e HERMES_DASHBOARD_HOST=0.0.0.0 \
+     -e HERMES_DASHBOARD_PORT=10000 \
+     -e HERMES_DASHBOARD_TUI=1 \
+     -e RENDER_MCP_API_KEY=your_render_key \
+     hermes-render
+   ```
+
+   To use **Amazon Bedrock**, inject your AWS credentials as env vars. Rather than pasting them, let the AWS CLI resolve and export them into a temp env-file that Docker reads (works with static keys, SSO, assumed roles, and temporary/STS creds — session token included):
+
+   ```bash
+   # Resolve credentials from your AWS CLI (respects AWS_PROFILE) into a temp file
+   creds="$(mktemp)"
+   aws configure export-credentials --format env-no-export > "$creds"
+   echo "AWS_REGION=$(aws configure get region)" >> "$creds"
+
+   docker run --rm -it \
+     -p 10000:10000 \
+     -v "$PWD/hermes-data:/opt/data" \
+     -e HERMES_DASHBOARD=1 \
+     -e HERMES_DASHBOARD_HOST=0.0.0.0 \
+     -e HERMES_DASHBOARD_PORT=10000 \
+     -e HERMES_DASHBOARD_TUI=1 \
+     --env-file "$creds" \
+     hermes-render
+
+   rm -f "$creds"
+   ```
+
+3. **Open the dashboard** at [http://localhost:10000](http://localhost:10000).
+
+4. **Set a provider key and model.** In the dashboard's **API Keys** tab, paste an LLM key (e.g. `OPENROUTER_API_KEY` or `ANTHROPIC_API_KEY`) — this writes to `/opt/data/.env` on your mounted volume. Then in the **Config** tab set `model` (and `provider`). For Bedrock, set `provider` to `bedrock` and `model` to a Bedrock model ID from the step above; the AWS credentials come from the `-e` flags, not the API Keys tab.
+
+### Notes
+
+- **Where each key lives.** `RENDER_MCP_API_KEY` and the `AWS_*` Bedrock vars must be passed as `-e` process env vars (mirroring Render's **Environment** tab), because `config.yaml`'s `${RENDER_MCP_API_KEY}` substitution and the AWS SDK both read the raw process environment at boot. LLM provider keys and chat-platform tokens go in the dashboard's **API Keys** tab (which writes `/opt/data/.env`). Pick one place per key to avoid drift.
+- **Persistence.** Drop the `-v .../opt/data` mount if you don't care about keeping state between runs. With it, delete the local `hermes-data/` directory to start clean.
+- **Don't override the entrypoint.** Run the image with no trailing command so the baked `ENTRYPOINT`/`CMD` chain (`bootstrap.sh` → config patch → upstream `entrypoint.sh` → `gateway run`) stays intact. See the Troubleshooting table for what breaks if it doesn't.
+- **The dashboard has no auth.** That's fine bound to `localhost`; never expose it on a public interface without the protections in the **Security** section.
+
 ## Post-deploy setup
 
 Once the service is healthy (the **Events** tab shows "Deploy live"), open the URL Render assigned (it ends in `.onrender.com`). You'll see the Hermes dashboard.
