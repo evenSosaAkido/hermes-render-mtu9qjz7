@@ -64,11 +64,16 @@ services:
       - key: OAUTH2_PROXY_SKIP_PROVIDER_BUTTON
         value: "true"
 
-      # Upstream = the private Hermes service, reached by its service name on
-      # the region-internal private network. Confirm the exact "Internal
-      # Address" on the hermes service's dashboard page if this ever changes.
+      # Upstream = the private Hermes service on the region-internal private
+      # network. IMPORTANT: the internal hostname is <service-name>-<hash>
+      # (e.g. hermes-a1b2), NOT the bare "hermes". Read the exact value from
+      # the hermes service's Connect → Internal tab and set it here as
+      # http://<internal-address>, e.g. http://hermes-a1b2:3000.
+      # Set from the Environment tab (sync: false) because the hash isn't
+      # known until the service exists. NOTE: port 10000 is RESERVED on
+      # Render's private network — the hermes dashboard is moved to 3000.
       - key: OAUTH2_PROXY_UPSTREAMS
-        value: http://hermes:10000
+        sync: false
 
       # Accept any verified email domain; group membership is the real gate.
       # Narrow to your domain (e.g. "akido.com") for defense in depth.
@@ -135,8 +140,11 @@ services:
         value: "1"
       - key: HERMES_DASHBOARD_HOST
         value: "0.0.0.0"
+      # NOTE: 10000 is a RESERVED port on Render's private network and cannot
+      # receive private traffic, so the dashboard is served on 3000 instead.
+      # oauth2-proxy targets this port via OAUTH2_PROXY_UPSTREAMS.
       - key: HERMES_DASHBOARD_PORT
-        value: "10000"
+        value: "3000"
       # Full Hermes TUI in the browser (server-side PTY + xterm.js).
       - key: HERMES_DASHBOARD_TUI
         value: "1"
