@@ -75,10 +75,13 @@ services:
       - key: OAUTH2_PROXY_EMAIL_DOMAINS
         value: "*"
 
-      # Request the groups claim and enforce membership. Requires the Okta
-      # authorization server to emit a "groups" claim (see README).
+      # Request identity scopes. NOTE: Okta delivers the groups *claim* via a
+      # claim mapping (see docs/AUTH.md), NOT via a "groups" scope — Okta's
+      # default authorization server has no such scope and returns
+      # invalid_scope if you request it. So keep groups out of the scope here
+      # and read it via OIDC_GROUPS_CLAIM below.
       - key: OAUTH2_PROXY_SCOPE
-        value: "openid email profile groups"
+        value: "openid email profile"
       - key: OAUTH2_PROXY_OIDC_GROUPS_CLAIM
         value: groups
 

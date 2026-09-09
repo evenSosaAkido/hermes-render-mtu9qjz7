@@ -68,6 +68,12 @@ administers your org's Okta.
      groups you care about).
    - Note the **issuer URL** — this is `OAUTH2_PROXY_OIDC_ISSUER_URL`.
 
+   > **`groups` is a CLAIM, not a SCOPE.** Do not add `groups` to
+   > `OAUTH2_PROXY_SCOPE` — Okta's default authorization server has no scope
+   > by that name and returns **`invalid_scope`** at login. Keep the scope as
+   > `openid email profile` and read the claim via
+   > `OAUTH2_PROXY_OIDC_GROUPS_CLAIM=groups`.
+
 ## Render setup
 
 1. **Generate a cookie secret** (32 bytes, required by oauth2-proxy):
